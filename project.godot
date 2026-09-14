@@ -1,0 +1,42 @@
+; MOGUL - Godot 4 project config
+; All balance lives in scripts/autoload/Balance.gd.
+; After a balance edit, verify the pacing with the in-engine bot:
+;   Godot_v4.7.2-stable_win64.exe --headless --path . -- --autoplay 6
+
+config_version=5
+
+[application]
+
+config/name="MOGUL"
+config/description="Click the till. Buy the block. Sell the company. Do it again, richer."
+run/main_scene="res://scenes/Main.tscn"
+config/features=PackedStringArray("4.4", "GL Compatibility")
+
+[autoload]
+
+Pal="*res://scripts/autoload/Pal.gd"
+Fmt="*res://scripts/autoload/Fmt.gd"
+SFX="*res://scripts/autoload/SFX.gd"
+Balance="*res://scripts/autoload/Balance.gd"
+Game="*res://scripts/autoload/Game.gd"
+
+[display]
+
+window/size/viewport_width=1440
+window/size/viewport_height=810
+window/size/window_width_override=1440
+window/size/window_height_override=810
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/size/resizable=true
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+environment/defaults/default_clear_color=Color(0.051, 0.059, 0.071, 1)
+anti_aliasing/quality/msaa_2d=2
+
+[audio]
+
+driver/enable_input=false
