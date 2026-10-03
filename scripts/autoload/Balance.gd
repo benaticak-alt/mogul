@@ -11,9 +11,29 @@ extends Node
 ## There is deliberately no JSON and no Python step: the numbers the bot
 ## measures are the numbers the game ships with.
 
+# ----------------------------------------------------------------- the deal
+# A sale is a little timing game rather than a mash. The first click opens a
+# deal and a marker starts running along a bar; a second click inside the
+# green zone closes it for a multiple and extends your streak. Click early and
+# you take the base. Sit on your hands and the customer walks.
+#
+# The cycle time is the real pacing lever here: it sets how often the player
+# is asked to do anything at all, and a game that asks every 0.4s is a mash
+# with extra steps.
+const DEAL_TIME := 1.45        ## seconds for the marker to cross the bar
+const DEAL_TIME_MIN := 0.60    ## however many speed upgrades, never under this
+const ZONE_WIDTH := 0.17       ## the green zone, as a fraction of the bar
+const ZONE_MIN := 0.40         ## placed somewhere in this span, so the timing
+const ZONE_MAX := 0.86         ## is never quite the same twice
+const PERFECT_MULT := 2.5      ## payout for closing inside the zone
+const WALKED_MULT := 0.5       ## payout if the marker runs off the end
+const COMBO_STEP := 0.15       ## payout bonus per consecutive clean close
+const COMBO_CAP := 10
+const COMBO_GRACE := 2.6       ## seconds idle before a streak lapses
+
 # ----------------------------------------------------------------- shape
 const COST_GROWTH := 1.15      ## producer price, per unit owned
-const CLICK_BASE := 1.0        ## dollars per manual sale before anything
+const CLICK_BASE := 1.0        ## dollars per deal before anything
 const LEGACY_BASE := 1.0e6     ## lifetime dollars behind the first legacy point
 const LEGACY_POWER := 0.5        ## square root: doubling the level takes 4x the earnings
 const LEVEL_BONUS := 0.02      ## income per legacy level, forever
@@ -62,18 +82,23 @@ const TIER_NAMES := {
 	"orbital":   ["Asteroid Claims", "Mass Driver", "Helium-3", "Lunar Refinery", "Belt Consortium", "Solar Monopoly"],
 }
 
-# Manual sales. id, name, cost, click multiplier, fraction of income added
-# to each click, blurb. Unlocked once the run has earned a quarter of the
-# price, so they appear a little before they can be had.
+# Deals. id, name, cost, payout multiplier, fraction of income added per
+# deal, extra green zone (fraction of the bar), cycle speed-up, blurb.
+# Unlocked once the run has earned a quarter of the price, so they appear a
+# little before they can be had.
+#
+# Every one of these doubles the payout - that is the part the balance rests
+# on - and some also make the minigame itself kinder, so the tab has texture
+# beyond a column of identical doublings.
 const CLICK_UPGRADES := [
-	["handshake", "Firm Handshake",     100.0,    2.0, 0.00, "People buy from people they like."],
-	["pitch",     "Sales Pitch",        1000.0,   2.0, 0.00, "Thirty seconds, one hook, no pauses."],
-	["upsell",    "The Upsell",         25000.0,  2.0, 0.02, "Would you like fries with that? You would."],
-	["loyalty",   "Loyalty Program",    1.0e6,    2.0, 0.02, "Buy nine, the tenth is on us. Mostly."],
-	["closer",    "Closing Bonus",      50.0e6,   2.0, 0.03, "Coffee is for closers."],
-	["rolodex",   "Golden Rolodex",     5.0e9,    2.0, 0.03, "Every number that matters, and a few that should not."],
-	["lunch",     "Power Lunch",        500.0e9,  2.0, 0.04, "The deal was done before the appetisers."],
-	["boardroom", "Boardroom Presence", 100.0e12, 2.0, 0.05, "You do not raise your voice. You do not have to."],
+	["handshake", "Firm Handshake",     100.0,    2.0, 0.00, 0.00, 1.00, "People buy from people they like."],
+	["pitch",     "Sales Pitch",        1000.0,   2.0, 0.00, 0.05, 1.00, "Thirty seconds, one hook, no pauses."],
+	["upsell",    "The Upsell",         25000.0,  2.0, 0.02, 0.00, 0.90, "Would you like fries with that? You would."],
+	["loyalty",   "Loyalty Program",    1.0e6,    2.0, 0.02, 0.04, 1.00, "Buy nine, the tenth is on us. Mostly."],
+	["closer",    "Closing Bonus",      50.0e6,   2.0, 0.03, 0.00, 0.88, "Coffee is for closers."],
+	["rolodex",   "Golden Rolodex",     5.0e9,    2.0, 0.03, 0.04, 1.00, "Every number that matters, and a few that should not."],
+	["lunch",     "Power Lunch",        500.0e9,  2.0, 0.04, 0.05, 1.00, "The deal was done before the appetisers."],
+	["boardroom", "Boardroom Presence", 100.0e12, 2.0, 0.05, 0.00, 0.86, "You do not raise your voice. You do not have to."],
 ]
 const CLICK_REVEAL := 0.25
 
@@ -136,15 +161,19 @@ const TREE := [
 		"desc": "Each legacy level pays +2% income instead of +1%.", "fx": {"level_bonus_mult": 2.0}},
 	# sales - manual sales
 	{"id": "tongue", "name": "Silver Tongue", "branch": "sales", "ring": 1, "cost": 1, "parent": "",
-		"desc": "Manual sales pay double.", "fx": {"click_mult": 2.0}},
+		"desc": "Deals pay double.", "fx": {"click_mult": 2.0}},
 	{"id": "closer_t", "name": "Closer", "branch": "sales", "ring": 2, "cost": 8, "parent": "tongue",
-		"desc": "Each manual sale also earns 1% of your income.", "fx": {"click_pct": 0.01}},
+		"desc": "Each deal also earns 1% of your income, and the green zone is half again as wide.",
+		"fx": {"click_pct": 0.01, "zone_mult": 1.5}},
 	{"id": "hardsell", "name": "Hard Sell", "branch": "sales", "ring": 3, "cost": 40, "parent": "closer_t",
-		"desc": "Manual sales pay triple.", "fx": {"click_mult": 3.0}},
+		"desc": "Deals pay triple, and close a third faster.",
+		"fx": {"click_mult": 3.0, "deal_speed": 0.67}},
 	{"id": "autodialer", "name": "Autodialer", "branch": "sales", "ring": 4, "cost": 120, "parent": "hardsell",
-		"desc": "Makes 2 sales a second for you.", "fx": {"autoclick": 2.0}},
+		"desc": "Grinds out 2 base sales a second on its own - no streak, but it never stops.",
+		"fx": {"autoclick": 2.0}},
 	{"id": "callcenter", "name": "Call Center", "branch": "sales", "ring": 5, "cost": 400, "parent": "autodialer",
-		"desc": "10 sales a second, and each earns a further 3% of income.", "fx": {"autoclick": 10.0, "click_pct": 0.03}},
+		"desc": "10 base sales a second, and every deal earns a further 3% of income.",
+		"fx": {"autoclick": 10.0, "click_pct": 0.03}},
 	# start - every new run
 	{"id": "seed", "name": "Seed Money", "branch": "start", "ring": 1, "cost": 2, "parent": "",
 		"desc": "Every run starts with $1,000.", "fx": {"start_cash": 1000.0}},
@@ -216,7 +245,9 @@ func _build_upgrades() -> void:
 			"cost": float(c[2]),
 			"mult": float(c[3]),
 			"pct": float(c[4]),
-			"blurb": String(c[5]),
+			"window": float(c[5]),
+			"speed": float(c[6]),
+			"blurb": String(c[7]),
 		})
 	for b in BRAND_UPGRADES:
 		upgrades.append({

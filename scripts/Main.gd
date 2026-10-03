@@ -6,20 +6,24 @@ extends Control
 ## diagram.
 
 const StreetViewScript := preload("res://scripts/StreetView.gd")
-const TopBarScript := preload("res://scripts/ui/TopBar.gd")
 const ShopPanelScript := preload("res://scripts/ui/ShopPanel.gd")
 const LegacyTreeScript := preload("res://scripts/ui/LegacyTree.gd")
 const OverlayScript := preload("res://scripts/ui/Overlay.gd")
 const AutoplayScript := preload("res://scripts/Autoplay.gd")
 
-const RIGHT_WIDTH := 392
+const DRAWER_W := 384
+const MARGIN := 14
 
 var street: Control
-var top: Control
 var shop: Control
 var tree_panel: Control
 var overlay: Control
 var tip: Tooltip
+var _btn_shop: Button
+var _btn_tree: Button
+var _btn_cash: Button
+var _shop_open := true
+var _last_gain := -1
 
 func _ready() -> void:
 	# The bot never builds an interface; it drives Game directly and quits.
@@ -51,6 +55,9 @@ func _ready() -> void:
 		if float(r["cash"]) > 0.0:
 			overlay.away(float(r["cash"]), float(r["secs"]))
 
+## The street is the window. Everything else floats on top of it and is
+## summoned by a button, which is the difference between a game and a
+## dashboard with a picture in one of its panes.
 func _build() -> void:
 	var bg := ColorRect.new()
 	bg.color = Pal.VOID
@@ -58,36 +65,48 @@ func _build() -> void:
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
 
-	var margin := MarginContainer.new()
-	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	for side in ["left", "right", "top", "bottom"]:
-		margin.add_theme_constant_override("margin_" + side, 10)
-	add_child(margin)
-
-	var col := UiKit.vbox(10)
-	margin.add_child(col)
-
-	top = TopBarScript.new()
-	col.add_child(top)
-
-	var row := UiKit.hbox(10)
-	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	col.add_child(row)
-
-	var frame := UiKit.panel(Pal.PANEL, Pal.LINE, 0)
-	frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	street = StreetViewScript.new()
-	street.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	street.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	frame.add_child(street)
-	row.add_child(frame)
+	street.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(street)
 
+	# The button cluster. A full-width row that ignores the mouse itself, so
+	# only the buttons take clicks and the rest of the strip is still street.
+	var row := UiKit.hbox(8)
+	row.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	row.offset_left = MARGIN
+	row.offset_right = -MARGIN
+	row.offset_top = MARGIN
+	row.alignment = BoxContainer.ALIGNMENT_END
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(row)
+
+	_btn_cash = UiKit.button("CASH OUT", Pal.GOLD, 13, true)
+	_btn_cash.pressed.connect(_ask_cash_out)
+	_btn_cash.visible = false
+	row.add_child(_btn_cash)
+
+	_btn_tree = UiKit.button("TREE  [L]", Pal.MAUVE, 13)
+	_btn_tree.pressed.connect(func() -> void: tree_panel.show_tree())
+	row.add_child(_btn_tree)
+
+	_btn_shop = UiKit.button("SHOP  [S]", Pal.CASH, 13)
+	_btn_shop.pressed.connect(func() -> void: toggle_shop())
+	row.add_child(_btn_shop)
+
+	var menu := UiKit.button("MENU", Pal.LINE, 13)
+	menu.pressed.connect(func() -> void: overlay.menu())
+	row.add_child(menu)
+
+	# The drawer, anchored to the right edge and clear of the buttons.
 	shop = ShopPanelScript.new()
-	shop.custom_minimum_size = Vector2(RIGHT_WIDTH, 0)
-	shop.size_flags_horizontal = Control.SIZE_SHRINK_END
-	shop.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	row.add_child(shop)
+	shop.set_anchors_and_offsets_preset(Control.PRESET_RIGHT_WIDE)
+	shop.offset_left = -(DRAWER_W + MARGIN)
+	shop.offset_right = -MARGIN
+	shop.offset_top = MARGIN + 46
+	shop.offset_bottom = -MARGIN
+	add_child(shop)
+	shop.closed.connect(func() -> void: toggle_shop(false))
+	street.right_inset = float(DRAWER_W + MARGIN * 2)
 
 	# Overlays, in the order they stack.
 	tree_panel = LegacyTreeScript.new()
@@ -98,12 +117,56 @@ func _build() -> void:
 	tip = Tooltip.new()
 	add_child(tip)
 
+## Slides the scene over rather than just hiding a box, so the HQ stays in the
+## middle of whatever space is actually left.
+func toggle_shop(force = null) -> void:
+	var want: bool = (not _shop_open) if force == null else bool(force)
+	if want == _shop_open:
+		return
+	_shop_open = want
+	SFX.play("tab", 1.0, -14.0)
+	shop.visible = true
+	var inset := float(DRAWER_W + MARGIN * 2) if want else 0.0
+	var tw := create_tween().set_parallel(true)
+	tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+	tw.tween_property(shop, "modulate:a", 1.0 if want else 0.0, 0.18)
+	tw.tween_property(street, "right_inset", inset, 0.22)
+	if not want:
+		tw.chain().tween_callback(func() -> void:
+			if not _shop_open:
+				shop.visible = false)
+
+func _ask_cash_out() -> void:
+	if Game.can_cash_out():
+		overlay.confirm_cash_out()
+
+## The buttons carry the state the old top bar used to: how many upgrades are
+## affordable, whether a perk is waiting, whether Cash Out is worth anything.
+func _process(_dt: float) -> void:
+	var gain := Game.legacy_gain()
+	_btn_cash.visible = gain > 0
+	_btn_cash.text = "CASH OUT  +%d" % gain
+	if gain != _last_gain:
+		if gain > 0 and _last_gain <= 0:
+			UiKit.attention(_btn_cash)
+		_last_gain = gain
+
+	var afford := 0
+	for u in Game.available_upgrades():
+		if Game.cash >= Game.upgrade_cost(u):
+			afford += 1
+	_btn_shop.text = "SHOP  [S]" + ("   %d" % afford if afford > 0 else "")
+	_btn_tree.text = "TREE  [L]" + ("   *" if _tree_waiting() else "")
+
+func _tree_waiting() -> bool:
+	if Game.legacy <= 0:
+		return false
+	for n in Balance.TREE:
+		if Game.node_can_buy(n["id"]):
+			return true
+	return false
+
 func _wire() -> void:
-	top.open_tree.connect(func() -> void: tree_panel.show_tree())
-	top.cash_out_requested.connect(func() -> void:
-		if Game.can_cash_out():
-			overlay.confirm_cash_out())
-	top.open_menu.connect(func() -> void: overlay.menu())
 	overlay.cash_out_confirmed.connect(func() -> void:
 		var gain := Game.cash_out()
 		SFX.play("cashout", 1.0, -2.0)
@@ -138,6 +201,8 @@ func _unhandled_input(ev: InputEvent) -> void:
 				overlay.close()
 			elif tree_panel.visible:
 				tree_panel.hide_tree()
+			elif _shop_open:
+				toggle_shop(false)
 			else:
 				overlay.menu()
 		KEY_L:
@@ -147,12 +212,17 @@ func _unhandled_input(ev: InputEvent) -> void:
 				tree_panel.show_tree()
 		KEY_SPACE:
 			if not tree_panel.visible and not overlay.is_open():
-				street.sell_from_key()
-		KEY_B:
-			shop.select_tab("buy")
-		KEY_U:
-			shop.select_tab("upgrades")
+				street.tap_from_key()
 		KEY_S:
+			toggle_shop()
+		KEY_1:
+			toggle_shop(true)
+			shop.select_tab("buy")
+		KEY_2:
+			toggle_shop(true)
+			shop.select_tab("upgrades")
+		KEY_3:
+			toggle_shop(true)
 			shop.select_tab("stats")
 		KEY_TAB:
 			shop.cycle_mult()
@@ -259,6 +329,16 @@ func _capture(path: String) -> void:
 		Game.cash = float(cash)
 	if _has_flag("--tree"):
 		tree_panel.show_tree()
+	if _has_flag("--drawer-closed"):
+		_shop_open = false
+		shop.visible = false
+		street.right_inset = 0.0
+	var deal := _flag("--deal")
+	if deal != "":
+		Game._open_deal()
+		Game.deal_zone = 0.52
+		Game.deal_t = float(deal)
+		Game.combo = int(_flag("--combo")) if _flag("--combo") != "" else 0
 	var tab := _flag("--tab")
 	if tab != "":
 		shop.select_tab(tab)
@@ -283,6 +363,8 @@ func _capture(path: String) -> void:
 		Game.rush_left = 20.0
 	Game.play_time = float(_flag("--time")) if _flag("--time") != "" else 0.0
 	street.set_process(true)
+	await get_tree().process_frame
+	street.clear_effects()
 	await get_tree().process_frame
 	await get_tree().process_frame
 	await get_tree().process_frame

@@ -4,9 +4,16 @@ extends Control
 ## Drawn every frame from Game state rather than kept as nodes: the HQ grows a
 ## floor per order of magnitude the run has earned, each owned producer gets
 ## a lot beside it that flies coins to the door, customers and cars thicken as
-## income climbs, and a day cycle lights the windows. Clicking the HQ is a
-## sale; clicking the gold VIP is the jackpot. Nothing here feeds back into
-## the economy except those two clicks.
+## income climbs, and a day cycle lights the windows.
+##
+## This fills the whole window and carries its own readouts, so the interface
+## is the scene plus a few floating buttons rather than a row of panels. The
+## stats are drawn here, over a scrim, because a bordered box around a number
+## is the thing that makes a game look like a dashboard.
+##
+## Clicking anywhere opens or closes a deal - the minigame should be about the
+## timing, never about aiming - and clicking the gold VIP takes priority.
+## Nothing here feeds back into the economy except those two clicks.
 
 const GROUND_FRAC := 0.86
 const HQ_W := 200.0
@@ -16,7 +23,10 @@ const LOT_W_MAX := 80.0
 const LOTS_PER_SIDE := 6
 const DAY_CYCLE := 360.0      ## seconds for a full day
 const MAX_COINS := 70
-const CLICK_HINT_UNTIL := 25  ## manual sales before the SELL prompt goes
+const DEAL_HINT_UNTIL := 12   ## deals closed before the prompt stops showing
+const BAR_W := 392.0          ## the deal bar, which is the thing you watch
+const BAR_H := 26.0
+const SCRIM_H := 142.0
 
 var _skyline: Array = []      ## [x_frac, w_frac, height, seed]
 var _far: Array = []          ## a second, hazier row behind it
@@ -34,7 +44,12 @@ var _auto_acc := 0.0
 var _auto_t := 0.0
 var _vip_dir := 1.0
 var _vip_hover := false
-var _hq_hover := false
+var _flash := 0.0             ## green flash on a clean close
+var _miss := 0.0              ## red flash on a fumble
+var _combo_pop := 0.0
+## Width of an open drawer. The scene composes to the left of it so the HQ is
+## never hidden behind the shop.
+var right_inset := 0.0
 var _font: Font
 var _rng := RandomNumberGenerator.new()
 
@@ -52,6 +67,8 @@ func _ready() -> void:
 	for i in range(80):
 		_stars.append(Vector2(_rng.randf(), _rng.randf() * 0.6))
 	Game.clicked.connect(_on_clicked)
+	Game.deal_opened.connect(_on_deal_opened)
+	Game.deal_closed.connect(_on_deal_closed)
 	Game.vip_spawned.connect(_on_vip)
 	Game.vip_resolved.connect(_on_vip_resolved)
 	Game.vip_missed.connect(func() -> void: _vip_hover = false)
@@ -63,6 +80,14 @@ func _ready() -> void:
 		_lot_timer.clear())
 
 # ------------------------------------------------------------ geometry
+
+## The scene is laid out inside the part of the window the shop is not
+## covering, so opening the drawer slides the block left instead of hiding it.
+func view_w() -> float:
+	return maxf(360.0, size.x - right_inset)
+
+func center_x() -> float:
+	return view_w() * 0.5
 
 func ground_y() -> float:
 	return floorf(size.y * GROUND_FRAC)
@@ -77,20 +102,20 @@ func hq_floor_h() -> float:
 
 func hq_rect() -> Rect2:
 	var h := float(hq_floors()) * hq_floor_h()
-	return Rect2(size.x * 0.5 - HQ_W * 0.5, ground_y() - h, HQ_W, h)
+	return Rect2(center_x() - HQ_W * 0.5, ground_y() - h, HQ_W, h)
 
 func hq_door() -> Vector2:
-	return Vector2(size.x * 0.5, ground_y() - 4.0)
+	return Vector2(center_x(), ground_y() - 4.0)
 
 func lot_w() -> float:
-	var half := size.x * 0.5 - HQ_W * 0.5 - 26.0
+	var half := center_x() - HQ_W * 0.5 - 26.0
 	return clampf(half / float(LOTS_PER_SIDE), 40.0, LOT_W_MAX)
 
 func lot_rect(i: int) -> Rect2:
 	var side := 1.0 if i % 2 == 0 else -1.0
 	var rank := i / 2
 	var w := lot_w()
-	var cx := size.x * 0.5 + side * (HQ_W * 0.5 + 16.0 + float(rank) * w + w * 0.5)
+	var cx := center_x() + side * (HQ_W * 0.5 + 16.0 + float(rank) * w + w * 0.5)
 	var h := 46.0 + float(i) * 5.0
 	var inner := w - 10.0
 	return Rect2(cx - inner * 0.5, ground_y() - h, inner, h)
@@ -106,36 +131,68 @@ func _gui_input(ev: InputEvent) -> void:
 	if ev is InputEventMouseMotion:
 		var m := (ev as InputEventMouseMotion).position
 		_vip_hover = Game.vip_active and _vip_hit(m)
-		_hq_hover = hq_rect().grow(16.0).has_point(m)
-		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if (_vip_hover or _hq_hover) else Control.CURSOR_ARROW
+		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if _vip_hover else Control.CURSOR_ARROW
 	elif ev is InputEventMouseButton:
 		var mb := ev as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+			# The VIP is a small moving target and the deal is the whole
+			# screen, so the VIP has to win the overlap.
 			if Game.vip_active and _vip_hit(mb.position):
 				Game.click_vip()
-			elif hq_rect().grow(16.0).has_point(mb.position):
-				var v := Game.click()
-				_sale_feedback(mb.position, v)
+			else:
+				Game.tap()
 			accept_event()
 
 func _vip_hit(m: Vector2) -> bool:
 	var p := vip_pos()
 	return Rect2(p.x - 22.0, p.y - 58.0, 44.0, 64.0).has_point(m)
 
-## Keyboard sales land on the door.
-func sell_from_key() -> void:
-	var v := Game.click()
-	_sale_feedback(hq_door() + Vector2(0, -30), v)
+## SPACE goes through the same path as a click, so the two can never drift.
+func tap_from_key() -> void:
+	Game.tap()
 
-func _sale_feedback(at: Vector2, v: float) -> void:
+func _on_deal_opened() -> void:
+	SFX.play("tab", 1.25, -22.0)
+
+## One place decides what a closed deal looks and sounds like, keyed off the
+## quality the economy reported rather than re-deriving it from the bar.
+func _on_deal_closed(amount: float, quality: String, combo: int) -> void:
+	var at := Vector2(center_x(), bar_rect().position.y - 6.0)
 	_punch = 1.0
 	_till_glow = 1.0
-	SFX.sale(-6.0)
-	_float(at + Vector2(randf_range(-8, 8), -10), "+" + Fmt.cash(v), Pal.INK, 15)
-	var n := 3 + mini(5, int(log(maxf(1.0, v)) / log(10.0)))
+	match quality:
+		"perfect":
+			_flash = 1.0
+			_combo_pop = 1.0
+			SFX.sale(-5.0)
+			if combo >= 3:
+				SFX.play("coin", 1.0 + 0.04 * float(mini(combo, 12)), -16.0)
+			var tag := "+" + Fmt.cash(amount)
+			if combo >= 2:
+				tag += "   x%d STREAK" % combo
+			_float(at, tag, Pal.CASH, 20, 1.1)
+			_burst(at, 7 + mini(8, combo), 300.0)
+		"walked":
+			_miss = 1.0
+			SFX.play("deny", 1.1, -20.0)
+			_float(at, "walked  +" + Fmt.cash(amount), Pal.DIM, 14, 0.9)
+		_:
+			_miss = 0.6
+			SFX.play("sale", 0.85, -12.0)
+			_float(at, "+" + Fmt.cash(amount), Pal.INK, 15, 0.9)
+			_burst(at, 3, 200.0)
+
+## Screenshot staging buys a street's worth of businesses in a single frame,
+## and every one of them throws a label. This clears the confetti.
+func clear_effects() -> void:
+	_floats.clear()
+	_bursts.clear()
+	_coins.clear()
+
+func _burst(at: Vector2, n: int, power: float) -> void:
 	for i in range(n):
 		_bursts.append({"pos": at, "t": 0.0,
-			"vel": Vector2(randf_range(-90, 90), randf_range(-240, -120))})
+			"vel": Vector2(randf_range(-110, 110), randf_range(-power, -power * 0.45))})
 
 func _on_clicked(amount: float, manual: bool) -> void:
 	if manual:
@@ -177,6 +234,9 @@ func _float(pos: Vector2, text: String, color: Color, fsize: int = 14, dur: floa
 func _process(dt: float) -> void:
 	_punch = maxf(0.0, _punch - dt * 5.0)
 	_till_glow = maxf(0.0, _till_glow - dt * 2.2)
+	_flash = maxf(0.0, _flash - dt * 2.6)
+	_miss = maxf(0.0, _miss - dt * 2.4)
+	_combo_pop = maxf(0.0, _combo_pop - dt * 3.2)
 
 	_auto_t += dt
 	if _auto_t >= 0.5:
@@ -323,8 +383,10 @@ func _draw() -> void:
 		var col: Color = f["color"]
 		col.a = 1.0 - t * t
 		var pos: Vector2 = (f["pos"] as Vector2) + Vector2(0, -46.0 * t)
-		draw_string(_font, pos + Vector2(-100, 0), f["text"], HORIZONTAL_ALIGNMENT_CENTER, 200, int(f["size"]), col)
+		_text(pos + Vector2(-160, 0), f["text"], HORIZONTAL_ALIGNMENT_CENTER, 320, int(f["size"]), col)
+	_draw_deal()
 	_draw_overlays()
+	_draw_hud()
 
 func _draw_sun_moon(gy: float) -> void:
 	var t := fmod(Game.play_time, DAY_CYCLE) / DAY_CYCLE
@@ -427,13 +489,6 @@ func _draw_hq(night: float) -> void:
 		var blink := 0.5 + 0.5 * sin(Game.play_time * 4.0)
 		draw_circle(Vector2(ax, lr.position.y - 48.0), 2.5, Color(1.0, 0.3, 0.25, 0.4 + 0.6 * blink))
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-	# Hover ring while it is the click target, and a prompt for the first few sales.
-	if _hq_hover:
-		draw_rect(r.grow(5.0), Color(Pal.CASH, 0.55), false, 2.0)
-	if Game.clicks_all < CLICK_HINT_UNTIL:
-		var pulse := 0.6 + 0.4 * sin(Game.play_time * 5.0)
-		var p := Vector2(r.get_center().x, r.position.y - 44.0)
-		draw_string(_font, p + Vector2(-80, 0), "CLICK TO SELL", HORIZONTAL_ALIGNMENT_CENTER, 160, 13, Color(Pal.INK, pulse))
 
 ## One lot per producer. Four silhouettes cycle down the ladder and the
 ## colour does the rest.
@@ -564,7 +619,7 @@ func _draw_overlays() -> void:
 	if Game.rush_left > 0.0:
 		draw_rect(Rect2(Vector2.ZERO, size), Pal.RUSH_TINT)
 		var w := 240.0
-		var r := Rect2(size.x * 0.5 - w * 0.5, 10.0, w, 34.0)
+		var r := Rect2(center_x() - w * 0.5, SCRIM_H + 46.0, w, 34.0)
 		draw_rect(r, Color(Pal.PANEL, 0.9))
 		draw_rect(r, Pal.GOLD, false, 1.5)
 		draw_string(_font, Vector2(r.position.x, r.position.y + 17.0), "RUSH HOUR  x%d" % int(Game.rush_mult()), HORIZONTAL_ALIGNMENT_CENTER, w, 14, Pal.GOLD)
@@ -572,5 +627,115 @@ func _draw_overlays() -> void:
 		draw_rect(Rect2(r.position.x + 8.0, r.end.y - 8.0, (w - 16.0) * clampf(Game.rush_left / total, 0.0, 1.0), 3.0), Pal.GOLD)
 	if Game.vip_active:
 		var pulse := 0.6 + 0.4 * sin(Game.play_time * 7.0)
-		var y := 66.0 if Game.rush_left > 0.0 else 26.0
-		draw_string(_font, Vector2(size.x * 0.5 - 140.0, y), "A VIP is on the street - click them", HORIZONTAL_ALIGNMENT_CENTER, 280, 13, Color(Pal.GOLD, pulse))
+		var y := SCRIM_H + (96.0 if Game.rush_left > 0.0 else 46.0)
+		_text(Vector2(center_x() - 160.0, y), "A VIP is on the street - click them", HORIZONTAL_ALIGNMENT_CENTER, 320, 13, Color(Pal.GOLD, pulse))
+
+# ------------------------------------------------------------------ the deal
+
+## Parked above the HQ, but pinned clear of the readout and never allowed to
+## drift past the middle of the screen - a tall tower would otherwise push it
+## into the sky and a one-floor one would bury it in the skyline.
+func bar_rect() -> Rect2:
+	var y := clampf(hq_rect().position.y - 108.0, SCRIM_H + 24.0, size.y * 0.5)
+	return Rect2(center_x() - BAR_W * 0.5, y, BAR_W, BAR_H)
+
+## The timing bar. This is the thing the player is actually looking at while
+## they play, so it gets the contrast budget: a dark track, a bright green
+## zone, and a marker with a tail so its direction is never ambiguous.
+func _draw_deal() -> void:
+	var r := bar_rect()
+	var plate := r.grow(9.0)
+	var pulse := 0.5 + 0.5 * sin(Game.play_time * 3.2)
+
+	# A backing plate. The scene behind this runs from a bright sky to a black
+	# skyline, and the bar has to be equally readable on both - which a
+	# translucent track alone never manages.
+	draw_rect(plate.grow(2.0), Color(Pal.VOID, 0.34))
+	draw_rect(plate, Color(Pal.VOID, 0.90))
+	var edge := Pal.LINE
+	if _flash > 0.0:
+		edge = Pal.CASH
+	elif _miss > 0.0:
+		edge = Pal.DANGER
+	draw_rect(plate, Color(edge, 0.55 + 0.45 * maxf(_flash, _miss)), false, 2.0)
+
+	if not Game.deal_active:
+		draw_rect(r, Color(Pal.PANEL_2, 0.85))
+		var msg := "CLICK ANYWHERE TO OPEN A DEAL" if Game.clicks_all < DEAL_HINT_UNTIL else "READY"
+		_text(Vector2(r.position.x, r.get_center().y + 5.0), msg,
+			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 13, Color(Pal.INK, 0.45 + 0.45 * pulse))
+		if _flash > 0.0 or _miss > 0.0:
+			draw_rect(r, Color(edge, 0.26 * maxf(_flash, _miss)))
+		return
+
+	# Track, then the green, then the marker over both.
+	draw_rect(r, Color("07080a"))
+	var zone := Rect2(r.position.x + r.size.x * Game.deal_zone, r.position.y,
+		r.size.x * Game.zone_width(), r.size.y)
+	var hot := Game.in_zone()
+	draw_rect(zone, Color(Pal.CASH, 1.0 if hot else 0.62))
+	if hot:
+		draw_rect(zone.grow(4.0), Pal.CASH, false, 2.0)
+		draw_rect(zone.grow(9.0), Color(Pal.CASH, 0.22), false, 3.0)
+	draw_rect(r, Color(Pal.LINE, 0.9), false, 1.0)
+
+	var mx := r.position.x + r.size.x * clampf(Game.deal_t, 0.0, 1.0)
+	var tail := maxf(r.position.x, mx - 34.0)
+	draw_rect(Rect2(tail, r.position.y + 2.0, mx - tail, r.size.y - 4.0), Color(Pal.INK, 0.16))
+	draw_rect(Rect2(mx - 3.0, r.position.y - 7.0, 6.0, r.size.y + 14.0), Color(Pal.VOID, 0.9))
+	draw_rect(Rect2(mx - 1.5, r.position.y - 6.0, 3.0, r.size.y + 12.0), Color.WHITE)
+
+	if Game.clicks_all < DEAL_HINT_UNTIL:
+		_text(Vector2(r.position.x, plate.position.y - 8.0), "CLICK AGAIN INSIDE THE GREEN",
+			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 12, Color(Pal.CASH, 0.55 + 0.45 * pulse))
+	# Streak, parked on the bar so the eye never has to leave it.
+	if Game.combo > 0:
+		var pop := 1.0 + 0.55 * _combo_pop
+		_text(Vector2(plate.end.x + 12.0, r.get_center().y + 7.0), "x%d" % Game.combo,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, int(19.0 * pop), Pal.GOLD)
+
+# ------------------------------------------------------------------- readout
+
+## Text with a drop shadow. Everything in the HUD goes through this: the scene
+## behind it runs from a bright noon sky to near-black midnight, and a shadow
+## is what lets one ink colour stay legible across both.
+func _text(pos: Vector2, text: String, align: int, width: float, fsize: int, col: Color) -> void:
+	draw_string(_font, pos + Vector2(1, 2), text, align, width, fsize, Color(0, 0, 0, col.a * 0.55))
+	draw_string(_font, pos, text, align, width, fsize, col)
+
+## Cash, rate and streak, top left, over a scrim rather than inside a panel.
+func _draw_hud() -> void:
+	# A soft darkening at the top of the scene, so white text reads at noon
+	# without putting a box around it.
+	# Two stacked ramps: a quick dark band at the very top where the text
+	# sits, then a long tail, so the fade never shows an edge.
+	var mid := SCRIM_H * 0.46
+	draw_polygon(
+		PackedVector2Array([Vector2(0, 0), Vector2(size.x, 0), Vector2(size.x, mid), Vector2(0, mid)]),
+		PackedColorArray([Color(Pal.VOID, 0.66), Color(Pal.VOID, 0.66), Color(Pal.VOID, 0.40), Color(Pal.VOID, 0.40)]))
+	draw_polygon(
+		PackedVector2Array([Vector2(0, mid), Vector2(size.x, mid), Vector2(size.x, SCRIM_H), Vector2(0, SCRIM_H)]),
+		PackedColorArray([Color(Pal.VOID, 0.40), Color(Pal.VOID, 0.40), Color(Pal.VOID, 0.0), Color(Pal.VOID, 0.0)]))
+
+	var x := 22.0
+	_text(Vector2(x, 30.0), "CASH", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Pal.DIM)
+	_text(Vector2(x, 70.0), Fmt.cash(Game.cash), HORIZONTAL_ALIGNMENT_LEFT, -1, 36, Pal.INK)
+
+	var rate := Fmt.per_sec(Game.income())
+	var rate_col := Pal.CASH
+	if Game.rush_left > 0.0:
+		rate = "%s   RUSH x%d" % [rate, int(Game.rush_mult())]
+		rate_col = Pal.GOLD
+	_text(Vector2(x, 94.0), rate, HORIZONTAL_ALIGNMENT_LEFT, -1, 17, rate_col)
+
+	var deal := "deal %s" % Fmt.cash(Game.click_value())
+	if Game.combo > 0:
+		deal += "   streak x%d  (%s)" % [Game.combo, Fmt.mult(Game.combo_mult())]
+	_text(Vector2(x, 115.0), deal, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Pal.AMBER)
+
+	if Game.legacy_level > 0 or Game.legacy > 0:
+		var leg := "legacy %d  (+%s)" % [Game.legacy_level,
+			Fmt.pct_whole(float(Game.legacy_level) * Balance.LEVEL_BONUS * Game.tree_mult("level_bonus_mult"))]
+		if Game.legacy > 0:
+			leg += "   %d to spend" % Game.legacy
+		_text(Vector2(x, 135.0), leg, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Pal.GOLD)

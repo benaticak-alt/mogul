@@ -7,6 +7,8 @@ extends Node
 ## are recomputed once, on the next read, rather than on every purchase.
 
 signal clicked(amount: float, manual: bool)
+signal deal_opened()
+signal deal_closed(amount: float, quality: String, combo: int)
 signal vip_spawned()
 signal vip_resolved(kind: String, amount: float)
 signal vip_missed()
@@ -34,6 +36,15 @@ var vip_active := false
 var vip_t := 0.0
 var vip_life := 0.0
 var _vip_next := 0.0
+
+# The deal in progress. `deal_t` runs 0 -> 1 across the bar and `deal_zone` is
+# where the green starts; both are transient and never saved.
+var deal_active := false
+var deal_t := 0.0
+var deal_zone := 0.5
+var combo := 0
+var best_combo := 0
+var _combo_grace := 0.0
 
 # ------------------------------------------------------------ persistent
 var earned_all := 0.0            ## lifetime, every run, the number legacy is cut from
@@ -83,6 +94,17 @@ func _process(dt: float) -> void:
 			var v := click_value()
 			_gain(v)
 			clicked.emit(v, false)
+
+	if deal_active:
+		deal_t += dt / deal_time()
+		if deal_t >= 1.0:
+			_resolve_deal("walked")
+	elif combo > 0:
+		# A streak only survives a short pause, so it rewards staying in the
+		# rhythm rather than remembering to click once a minute.
+		_combo_grace -= dt
+		if _combo_grace <= 0.0:
+			combo = 0
 
 	if vip_active:
 		vip_t += dt
@@ -163,12 +185,6 @@ func base_income() -> float:
 		_recalc()
 	return _income
 
-func click_value() -> float:
-	if _dirty:
-		_recalc()
-	# The income slice of a sale rides the rush; the flat part does not.
-	return _click_flat + _income * rush_mult() * _click_pct
-
 # ------------------------------------------------------------ tree effects
 
 func tree_has(id: String) -> bool:
@@ -200,6 +216,13 @@ func tree_max(key: String, floor_value: float = 0.0) -> float:
 	var m := floor_value
 	for v in _fx_values(key):
 		m = maxf(m, float(v))
+	return m
+
+## For effects where smaller is better, like the deal cycle.
+func tree_min(key: String, ceil_value: float = 1.0) -> float:
+	var m := ceil_value
+	for v in _fx_values(key):
+		m = minf(m, float(v))
 	return m
 
 func discount() -> float:
@@ -292,6 +315,7 @@ func upgrade_value(u: Dictionary, clicks_per_sec: float = 0.0) -> float:
 		"producer":
 			return producer_income(u["target"]) * (float(u["mult"]) - 1.0)
 		"click":
+			# `clicks_per_sec` is how often the player actually closes a deal.
 			var cv := click_value()
 			return (cv * (float(u["mult"]) - 1.0) + base_income() * float(u["pct"])) * clicks_per_sec
 		"brand":
@@ -316,15 +340,74 @@ func total_producers() -> int:
 		n += int(v)
 	return n
 
-# ------------------------------------------------------------ sales
+# ------------------------------------------------------------ the deal
 
-func click() -> float:
+## Seconds the marker takes to cross the bar, after every speed upgrade.
+func deal_time() -> float:
+	var t := Balance.DEAL_TIME * tree_min("deal_speed", 1.0)
+	for u in Balance.upgrades:
+		if u["kind"] == "click" and owned.has(u["id"]):
+			t *= float(u["speed"])
+	return maxf(Balance.DEAL_TIME_MIN, t)
+
+## Width of the green zone, as a fraction of the bar.
+func zone_width() -> float:
+	var w := Balance.ZONE_WIDTH * tree_max("zone_mult", 1.0)
+	for u in Balance.upgrades:
+		if u["kind"] == "click" and owned.has(u["id"]):
+			w += float(u["window"])
+	return clampf(w, 0.05, 0.6)
+
+func combo_mult() -> float:
+	return 1.0 + float(mini(combo, Balance.COMBO_CAP)) * Balance.COMBO_STEP
+
+## True while the marker is inside the green. The interface reads this rather
+## than recomputing the geometry, so the bar and the payout can never disagree.
+func in_zone() -> bool:
+	return deal_active and deal_t >= deal_zone and deal_t <= deal_zone + zone_width()
+
+## A click: opens a deal if none is running, otherwise closes the one that is.
+## Returns the payout, or 0 for the click that merely opened the deal.
+func tap() -> float:
+	if not deal_active:
+		_open_deal()
+		return 0.0
+	return _resolve_deal("perfect" if in_zone() else "early")
+
+func _open_deal() -> void:
+	deal_active = true
+	deal_t = 0.0
+	deal_zone = randf_range(Balance.ZONE_MIN, Balance.ZONE_MAX - zone_width())
+	deal_opened.emit()
+
+func _resolve_deal(quality: String) -> float:
+	deal_active = false
 	var v := click_value()
+	match quality:
+		"perfect":
+			v *= Balance.PERFECT_MULT * combo_mult()
+			combo += 1
+			best_combo = maxi(best_combo, combo)
+		"walked":
+			v *= Balance.WALKED_MULT
+			combo = 0
+		_:
+			combo = 0
+	_combo_grace = Balance.COMBO_GRACE
 	_gain(v)
 	clicks_run += 1
 	clicks_all += 1
+	deal_closed.emit(v, quality, combo)
 	clicked.emit(v, true)
 	return v
+
+## What one closed deal is worth before the quality multiplier. The autodialer
+## pays this flat, which is why it never builds a streak.
+func click_value() -> float:
+	if _dirty:
+		_recalc()
+	# The income slice of a sale rides the rush; the flat part does not.
+	return _click_flat + _income * rush_mult() * _click_pct
 
 # ------------------------------------------------------------ VIPs
 
@@ -405,6 +488,9 @@ func _reset_run() -> void:
 	owned.clear()
 	rush_left = 0.0
 	vip_active = false
+	deal_active = false
+	deal_t = 0.0
+	combo = 0
 	_autoclick_acc = 0.0
 	_schedule_vip()
 	for n in Balance.TREE:
@@ -458,6 +544,10 @@ func hard_reset() -> void:
 	owned.clear()
 	rush_left = 0.0
 	vip_active = false
+	deal_active = false
+	deal_t = 0.0
+	combo = 0
+	best_combo = 0
 	earned_all = 0.0
 	legacy_level = 0
 	legacy = 0

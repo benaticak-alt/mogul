@@ -1,11 +1,16 @@
 extends PanelContainer
-## The right-hand column: BUY, UPGRADES and STATS tabs.
+## The shop drawer: BUY, UPGRADES and STATS tabs.
+##
+## It floats over the street rather than sitting in a column beside it, so the
+## scene is always full width and the shop is something you open.
 ##
 ## Rows are built once and their labels rewritten every frame; the upgrade
 ## list is rebuilt only when the set of available upgrades changes, since
 ## that is the one list that comes and goes.
 
 const TAB_ACCENT := {"buy": Pal.CASH, "upgrades": Pal.AMBER, "stats": Pal.STEEL}
+
+signal closed()
 
 var _tab := "buy"
 var _mult := 1                         ## 1, 10, 100 or 0 for max
@@ -22,9 +27,18 @@ var _upg_empty: Label
 var _stats: Dictionary = {}
 
 func _ready() -> void:
-	add_theme_stylebox_override("panel", UiKit.stylebox(Pal.PANEL, Pal.LINE, 6, 1, 10))
+	add_theme_stylebox_override("panel", UiKit.stylebox(Pal.PANEL, Pal.LINE, 8, 1, 10))
 	var v := UiKit.vbox(8)
 	add_child(v)
+
+	var head := UiKit.hbox(6)
+	var title := UiKit.label("THE SHOP", 13, Pal.DIM)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(title)
+	var x := UiKit.flat_button("CLOSE  [S]", 11)
+	x.pressed.connect(func() -> void: closed.emit())
+	head.add_child(x)
+	v.add_child(head)
 
 	var tabs := UiKit.hbox(4)
 	for id in ["buy", "upgrades", "stats"]:
